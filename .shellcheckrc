@@ -1,0 +1,3 @@
+# lib/*.sh files are sourced, not executed: guard-clause returns are reachable
+# from other files, and "unused" vars are consumed across the sourcing chain.
+disable=SC2317,SC2034

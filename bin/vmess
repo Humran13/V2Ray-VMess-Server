@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# vmess - V2Ray VMess Server manager. Run with no arguments for the
+# interactive menu, or use one of the CLI subcommands below.
+set -Eeuo pipefail
+
+_self_dir() { cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd; }
+APP_DIR="$(_self_dir)"
+[[ -f "${APP_DIR}/lib/common.sh" ]] || APP_DIR="/opt/v2ray-vmess-server"
+
+# shellcheck source=lib/common.sh
+source "${APP_DIR}/lib/common.sh"
+for f in os validate transports tls reality users config xray network firewall service client menu backup update diagnostics uninstall; do
+  # shellcheck disable=SC1090
+  source "${APP_DIR}/lib/${f}.sh"
+done
+
+VMESS_ASSUME_YES=${VMESS_ASSUME_YES:-0}
+export VMESS_ASSUME_YES
+
+print_usage() {
+  cat <<'EOF'
+vmess - V2Ray VMess Server manager
+
+Usage: vmess [command] [args]
+
+  status                     Show service, mode, and version info
+  user add <name>            Create a new user
+  user list                  List all users
+  user show <name>           Show a user's details
+  user enable <name>         Enable a user
+  user disable <name>        Disable a user
+  user delete <name>         Delete a user
+  qr <name>                  Show QR code for a user (if representable)
+  config <name>              Print canonical client JSON for a user
+  link <name>                Print vmess:// share link for a user
+  diagnostics                Run health checks
+  logs [--follow]            Show/follow service logs
+  restart                    Restart the Xray service
+  backup                     Create a backup archive
+  restore <file>             Restore from a backup archive
+  update                     Update Xray-core to the latest stable version
+  repair                     Repair the installation
+  uninstall [--purge]        Uninstall (keep or purge data)
+  firewall status            Show firewall backend/rules
+  version                    Show manager and Xray-core versions
+
+With no arguments, an interactive menu is shown.
+EOF
+}
+
+need_state() { [[ -f "$VMESS_STATE_FILE" ]] || die "No installation found. Run install.sh first."; }
+
+action_status() {
+  need_state
+  print_kv "Manager" "$(manager_version)"
+  print_kv "Xray-core" "$(xray_version)"
+  print_kv "Service" "$(service_status_text)"
+  print_kv "Mode" "VMess + $(transport_label "$(state_get '.transport')") + $(state_get '.security')"
+  print_kv "Server" "$(client_server_address)"
+  print_kv "Port" "$(state_get '.port')"
+  print_kv "Users" "$(users_count)"
+}
+
+action_user_add() {
+  local name=$1
+  require_root; need_state
+  local uuid; uuid=$(users_add "$name")
+  config_apply || die "Failed to apply configuration after adding user."
+  log_ok "Added user '$name' with UUID $uuid"
+}
+
+action_user_list() {
+  need_state
+  printf '%-20s %-38s %-8s %s\n' "NAME" "UUID" "ENABLED" "CREATED"
+  users_list | while IFS=$'\t' read -r name uuid enabled created; do
+    printf '%-20s %-38s %-8s %s\n' "$name" "$uuid" "$enabled" "$created"
+  done
+}
+
+action_user_show() {
+  local name=$1; need_state
+  users_get_json "$name" || die "No such user: $name"
+}
+
+action_user_enable() { require_root; need_state; users_set_enabled "$1" true; config_apply || die "Failed to apply."; log_ok "Enabled $1"; }
+action_user_disable() { require_root; need_state; users_set_enabled "$1" false; config_apply || die "Failed to apply."; log_ok "Disabled $1"; }
+action_user_delete() { require_root; need_state; users_delete "$1"; config_apply || die "Failed to apply."; log_ok "Deleted $1"; }
+
+action_qr() {
+  local name=$1; need_state
+  local uri; uri=$(client_build_uri "$name")
+  if [[ -n "$uri" ]]; then client_qr_render "$uri"; echo "$uri"
+  else log_warn "$(client_uri_caveat "$(state_get '.transport')")"; action_config "$name"
+  fi
+}
+
+action_config() { local name=$1; need_state; client_build_config_json "$name"; }
+action_link() {
+  local name=$1; need_state
+  local uri; uri=$(client_build_uri "$name")
+  if [[ -n "$uri" ]]; then echo "$uri"
+  else log_warn "$(client_uri_caveat "$(state_get '.transport')")"; action_config "$name"
+  fi
+}
+
+action_diagnostics() { need_state; run_diagnostics; }
+action_logs() { need_state; [[ "${1:-}" == "--follow" ]] && service_logs 1 || service_logs 0; }
+action_restart() { require_root; need_state; service_restart_and_check && log_ok "Restarted." || die "Restart failed health check."; }
+action_backup() { require_root; need_state; local f; f=$(backup_create); log_ok "Backup created: $f"; }
+action_restore() { require_root; need_state; backup_restore "$1"; }
+action_update() { require_root; need_state; update_xray_core; }
+action_repair() { require_root; need_state; vmess_repair; }
+
+action_uninstall() {
+  require_root
+  local mode="keep"
+  [[ "${1:-}" == "--purge" ]] && mode="purge"
+  if [[ "$VMESS_ASSUME_YES" != "1" ]] && is_interactive; then
+    confirm "This will uninstall V2Ray VMess Server (mode: $mode). Continue?" N || { log_info "Cancelled."; return 0; }
+  fi
+  uninstall_run "$mode"
+}
+
+action_firewall_status() { firewall_status_summary; }
+
+action_version() {
+  echo "Manager: $(manager_version)"
+  echo "Xray-core: $(xray_version)"
+}
+
+vmess_repair() {
+  log_step "Repairing installation"
+  ensure_dir "$VMESS_STATE_DIR" 0750
+  ensure_dir "$VMESS_APP_DIR" 0755
+  ensure_dependencies
+  [[ -x "$VMESS_XRAY_BIN" ]] || die "Xray binary missing; reinstall required."
+  ln -sf "${VMESS_APP_DIR}/bin/vmess" "$VMESS_MANAGER_LINK"
+  service_install_unit
+  if config_apply; then log_ok "Repair completed; service is healthy."; else die "Repair failed."; fi
+}
+
+# --- Interactive menu -----------------------------------------------------
+interactive_menu() {
+  need_state
+  while true; do
+    print_banner "V2Ray VMess Server Manager"
+    local choice
+    menu_choose choice "Select an option:" \
+      "Server status" "Add user" "List users" "Show user" "Show QR code" \
+      "Export client configuration" "Enable user" "Disable user" "Delete user" \
+      "Change connection mode" "Change server port" "TLS/certificate management" \
+      "REALITY management" "Restart Xray" "View logs" "Diagnostics" "Backup" \
+      "Restore" "Update Xray" "Repair installation" "Firewall status" "Uninstall" "Exit"
+    local name file
+    case "$choice" in
+      1) action_status ;;
+      2) menu_input name "New user name"; action_user_add "$name" ;;
+      3) action_user_list ;;
+      4) menu_input name "User name"; action_user_show "$name" ;;
+      5) menu_input name "User name"; action_qr "$name" ;;
+      6) menu_input name "User name"; action_config "$name" ;;
+      7) menu_input name "User name"; action_user_enable "$name" ;;
+      8) menu_input name "User name"; action_user_disable "$name" ;;
+      9) menu_input name "User name"; action_user_delete "$name" ;;
+      10) log_warn "Changing connection mode requires re-running install.sh (it regenerates transport/security material safely)." ;;
+      11) menu_input name "New port"; require_valid "$name" valid_port "port"; state_set_num port "$name"; config_apply && log_ok "Port changed to $name" || log_err "Failed to apply new port." ;;
+      12) log_info "TLS domain: $(state_get '.domain') | mode: $(state_get '.tls.mode')"; local cert; cert=$(state_get '.tls.cert'); [[ -f "$cert" ]] && tls_check_expiry "$cert" ;;
+      13) log_info "REALITY target: $(state_get '.reality.target') | SNI: $(state_get '.reality.server_names[0]')" ;;
+      14) action_restart ;;
+      15) action_logs ;;
+      16) action_diagnostics ;;
+      17) action_backup ;;
+      18) menu_input file "Backup file path"; action_restore "$file" ;;
+      19) action_update ;;
+      20) action_repair ;;
+      21) action_firewall_status ;;
+      22) action_uninstall; break ;;
+      23) break ;;
+    esac
+    pause_for_user
+  done
+}
+
+# --- CLI dispatch -----------------------------------------------------------
+cmd=${1:-}
+case "$cmd" in
+  "") interactive_menu ;;
+  status) action_status ;;
+  user)
+    sub=${2:-}; name=${3:-}
+    case "$sub" in
+      add) action_user_add "$name" ;;
+      list) action_user_list ;;
+      show) action_user_show "$name" ;;
+      enable) action_user_enable "$name" ;;
+      disable) action_user_disable "$name" ;;
+      delete) action_user_delete "$name" ;;
+      *) print_usage; exit 1 ;;
+    esac
+    ;;
+  qr) action_qr "${2:-}" ;;
+  config) action_config "${2:-}" ;;
+  link) action_link "${2:-}" ;;
+  diagnostics) action_diagnostics ;;
+  logs) action_logs "${2:-}" ;;
+  restart) action_restart ;;
+  backup) action_backup ;;
+  restore) action_restore "${2:-}" ;;
+  update) action_update ;;
+  repair) action_repair ;;
+  uninstall) action_uninstall "${2:-}" ;;
+  firewall) [[ "${2:-}" == "status" ]] && action_firewall_status || print_usage ;;
+  version) action_version ;;
+  -h|--help|help) print_usage ;;
+  *) echo "Unknown command: $cmd" >&2; print_usage; exit 1 ;;
+esac

@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x install.sh bin/vmess lib/*.sh tests/integration/run_combo.sh
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    needs: shellcheck
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install bats and jq
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats jq
+      - name: Run unit tests
+        run: bats tests/unit/
+
+  # Full transport/security matrix on the most representative modern LTS.
+  transport-matrix:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        combo:
+          - "raw none"
+          - "raw tls"
+          - "raw reality"
+          - "xhttp none"
+          - "xhttp tls"
+          - "xhttp reality"
+          - "grpc none"
+          - "grpc tls"
+          - "grpc reality"
+          - "websocket none"
+          - "websocket tls"
+          - "httpupgrade none"
+          - "httpupgrade tls"
+          - "mkcp none"
+          - "mkcp tls"
+          - "hysteria tls"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build systemd test image (Ubuntu 24.04)
+        run: docker build --build-arg UBUNTU_VERSION=24.04 -t vmess-itest -f tests/integration/Dockerfile .
+      - name: Run real install + connectivity test for one transport/security combo
+        run: |
+          docker run -d --name vmess_ci --privileged --tmpfs /run --tmpfs /run/lock \
+            -v "${{ github.workspace }}:/opt/src:ro" vmess-itest
+          sleep 5
+          docker exec vmess_ci systemctl is-system-running --wait || true
+          docker exec vmess_ci bash -c "cp -r /opt/src /opt/work"
+
+          set -- ${{ matrix.combo }}
+          TRANSPORT=$1; SECURITY=$2
+          docker exec vmess_ci bash /opt/work/tests/integration/run_combo.sh "$TRANSPORT" "$SECURITY" 8443
+      - name: Cleanup
+        if: always()
+        run: docker rm -f vmess_ci 2>/dev/null || true
+
+  # OS compatibility smoke test: the recommended default combo across every
+  # explicitly supported Ubuntu release.
+  os-matrix:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu_version: ["18.04", "20.04", "22.04", "24.04", "26.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build systemd test image
+        run: docker build --build-arg UBUNTU_VERSION=${{ matrix.ubuntu_version }} -t vmess-itest -f tests/integration/Dockerfile .
+      - name: Run real install + connectivity test (VMess + RAW + REALITY)
+        run: |
+          docker run -d --name vmess_ci --privileged --tmpfs /run --tmpfs /run/lock \
+            -v "${{ github.workspace }}:/opt/src:ro" vmess-itest
+          sleep 5
+          docker exec vmess_ci systemctl is-system-running --wait || true
+          docker exec vmess_ci bash -c "cp -r /opt/src /opt/work"
+          docker exec vmess_ci bash /opt/work/tests/integration/run_combo.sh raw reality 8443
+      - name: Cleanup
+        if: always()
+        run: docker rm -f vmess_ci 2>/dev/null || true
+
+  arm64-smoke:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Build arm64 systemd test image
+        run: docker build --platform linux/arm64 --build-arg UBUNTU_VERSION=22.04 -t vmess-itest-arm64 -f tests/integration/Dockerfile .
+      - name: Run real install + connectivity test on emulated arm64
+        run: |
+          docker run -d --name vmess_arm64 --platform linux/arm64 --privileged --tmpfs /run --tmpfs /run/lock \
+            -v "${{ github.workspace }}:/opt/src:ro" vmess-itest-arm64
+          sleep 5
+          docker exec vmess_arm64 systemctl is-system-running --wait || true
+          docker exec vmess_arm64 bash -c "cp -r /opt/src /opt/work"
+          docker exec vmess_arm64 bash /opt/work/tests/integration/run_combo.sh raw reality 8443
+      - name: Cleanup
+        if: always()
+        run: docker rm -f vmess_arm64 2>/dev/null || true
