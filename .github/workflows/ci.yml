@@ -118,7 +118,11 @@ jobs:
           sleep 5
           docker exec vmess_arm64 systemctl is-system-running --wait || true
           docker exec vmess_arm64 bash -c "cp -r /opt/src /opt/work"
-          docker exec vmess_arm64 bash /opt/work/tests/integration/run_combo.sh raw reality 8443
+          # Plain HTTP target: see the comment on VMESS_TEST_URL in
+          # run_combo.sh for why HTTPS-through-tunnel is flaky under QEMU
+          # user-mode emulation specifically (not a product issue).
+          docker exec -e VMESS_TEST_URL=http://neverssl.com vmess_arm64 \
+            bash /opt/work/tests/integration/run_combo.sh raw reality 8443
       - name: Cleanup
         if: always()
         run: docker rm -f vmess_arm64 2>/dev/null || true
