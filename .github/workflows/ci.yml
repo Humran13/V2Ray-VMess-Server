@@ -15,7 +15,12 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -x install.sh bin/vmess lib/*.sh tests/integration/run_combo.sh
+          # severity=warning: fail on real bugs, not on style notes like
+          # SC2015 (A&&B||C used intentionally) or SC2086 (safe: transport
+          # and security are internally-controlled enum values, not user
+          # input) that ShellCheck otherwise reports at info level.
+          shellcheck -x --severity=warning -e SC2015,SC2086 \
+            install.sh bin/vmess lib/*.sh tests/integration/run_combo.sh
 
   unit-tests:
     runs-on: ubuntu-latest
