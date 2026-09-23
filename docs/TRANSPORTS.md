@@ -50,6 +50,17 @@ works in some clients and silently fails in others, this project:
   JSON instead, with an explicit note — the config is exact and correct, it
   just isn't expressed as a legacy share link.
 
+## A note on REALITY target reachability
+
+REALITY's camouflage target must be a real site your server can reach with a
+clean TLS 1.3 handshake. In testing, reachability was observed to vary by
+network/hosting provider for some popular example targets (e.g. one test
+network could not reliably complete a REALITY handshake against
+`www.microsoft.com:443`, while `swift.com:443` worked consistently). This
+project therefore defaults to `swift.com:443` and validates whichever target
+is chosen (`--reality-target host:port`) with a live TLS 1.3 probe before
+finishing setup, so a bad target is caught at install time rather than after.
+
 ## Real end-to-end testing performed
 
 Every row in the compatibility table above (16 valid transport/security
